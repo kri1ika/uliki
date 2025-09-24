@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Трекер Улик</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        setLogLevel('debug');
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        window.app = initializeApp(firebaseConfig);
+        window.db = getFirestore(window.app);
+        window.auth = getAuth(window.app);
+        
+        onAuthStateChanged(window.auth, (user) => {
+            if (user) {
+                window.userId = user.uid;
+                window.dispatchEvent(new Event('auth-ready'));
+            } else {
+                signInAnonymously(window.auth).catch(error => {
+                    console.error("Ошибка анонимной аутентификации: ", error);
+                });
+            }
+        });
+        
+        if (typeof __initial_auth_token !== 'undefined') {
+            signInWithCustomToken(window.auth, __initial_auth_token).catch(error => {
+                console.error("Ошибка аутентификации с токеном: ", error);
+                signInAnonymously(window.auth);
+            });
+        }
+    </script>
+    <!-- Chosen Palette: Warm Neutrals -->
+    <!-- Application Structure Plan: A single-view dashboard design is used. The core is an an interactive grid-based checklist for tracking evidence against factions. This is supplemented by dynamic progress bars for each faction to provide a quick visual summary. A reset button adds utility. This structure was chosen for its direct, task-oriented approach, which is ideal for a simple tracking tool and avoids unnecessary complexity for the user. -->
+    <!-- Visualization & Content Choices: Main data (evidence list) -> Goal: Organize/Interact -> Presentation: Interactive HTML/CSS Grid -> Interaction: Click to toggle checkmark/color -> Justification: Intuitive checklist functionality. Progress data (counts) -> Goal: Compare/Inform -> Presentation: HTML/CSS Progress Bars -> Interaction: Dynamically updates on checklist interaction -> Justification: Provides at-a-glance summary and comparison. No complex charts needed, hence no Chart.js. No SVG/Mermaid used. -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .evidence-cell {
+            transition: background-color 0.2s ease-in-out;
+        }
+        .evidence-cell.checked {
+            background-color: #a7f3d0;
+        }
+        .evidence-cell.checked .checkmark {
+            opacity: 1;
+        }
+        .checkmark {
+            opacity: 0;
+            transition: opacity 0.2s ease-in-out;
+            font-size: 1.5rem;
+            line-height: 1;
+            color: #059669;
+        }
+        .progress-bar-inner {
+            transition: width 0.3s ease-in-out;
+        }
+    </style>
+</head>
+<body class="bg-amber-50 text-gray-800">
+
+    <div class="container mx-auto p-4 sm:p-6 md:p-8 max-w-5xl">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl md:text-5xl font-bold text-gray-900">Трекер Улик</h1>
+            <p class="mt-2 text-lg text-gray-600">Интерактивная доска для отслеживания улик против государственных фракций.</p>
+        </header>
+
+        <main>
+            <div id="user-info" class="text-center text-sm mb-4 text-gray-500">
+                <span id="user-id-display">Загрузка пользователя...</span>
+            </div>
+            <section id="progress-section" class="mb-8 p-6 bg-white rounded-2xl shadow-md">
+                <h2 class="text-2xl font-bold mb-4 text-center">Прогресс сбора улик</h2>
+                <div id="progress-bars" class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                </div>
+            </section>
+
+            <section id="evidence-tracker" class="bg-white rounded-2xl shadow-md overflow-hidden">
+                <div id="evidence-grid-header" class="grid grid-cols-4 items-center p-4 bg-gray-100 font-bold text-gray-700">
+                    <div class="col-span-1 text-lg">Улика</div>
+                    <div class="col-span-1 text-center text-lg">FIB</div>
+                    <div class="col-span-1 text-center text-lg">LSPD</div>
+                    <div class="col-span-1 text-center text-lg">LSSD</div>
+                </div>
+                <div id="evidence-grid-body">
+                    <div class="text-center p-8 text-gray-500">Загрузка данных. Пожалуйста, проверьте консоль (F12) на наличие отладочных сообщений.</div>
+                </div>
+            </section>
+
+            <footer class="mt-8 text-center">
+                <button id="reset-button" class="px-8 py-3 bg-red-500 text-white font-bold rounded-lg shadow-md hover:bg-red-600 focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-opacity-75 transition-transform transform hover:scale-105">
+                    Сбросить всё
+                </button>
+            </footer>
+        </main>
+    </div>
+
+    <script type="module">
+        import { getAuth } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        document.addEventListener('auth-ready', () => {
+            const FACTION_KEY = 'factionsData';
+            const factions = [
+                { id: 'fib', name: 'FIB' },
+                { id: 'lspd', name: 'LSPD' },
+                { id: 'lssd', name: 'LSSD' }
+            ];
+
+            const evidences = [
+                'Амунка',
+                'Поезд',
+                'Рейд',
+                'Чёрный рынок',
+                'Допрос от гос',
+                'Масскафф',
+                'Допрос DB / SID / SDB'
+            ];
+
+            const progressBarsContainer = document.getElementById('progress-bars');
+            const gridBody = document.getElementById('evidence-grid-body');
+            const resetButton = document.getElementById('reset-button');
+            const userIdDisplay = document.getElementById('user-id-display');
+            
+            const db = getFirestore(window.app);
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            const trackerDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'evidence_trackers', 'main-tracker');
+
+            function initialize() {
+                userIdDisplay.textContent = `Ваш ID: ${window.userId}`;
+                renderProgressBars();
+                setupEventListeners();
+                listenForUpdates();
+            }
+
+            function listenForUpdates() {
+                onSnapshot(trackerDocRef, (docSnap) => {
+                    const data = docSnap.exists() ? docSnap.data() : {};
+                    console.log("Данные получены из Firestore:", data);
+                    renderGrid(data);
+                    updateAllProgress(data);
+                }, (error) => {
+                    console.error("Ошибка при получении данных из Firestore:", error);
+                    gridBody.innerHTML = '<div class="text-center p-8 text-red-500">Произошла ошибка при загрузке данных. Проверьте соединение и консоль.</div>';
+                });
+            }
+
+            function renderProgressBars() {
+                progressBarsContainer.innerHTML = '';
+                factions.forEach(faction => {
+                    const barHTML = `
+                        <div class="text-center">
+                            <h3 class="text-xl font-semibold">${faction.name}</h3>
+                            <div class="bg-gray-200 rounded-full h-6 mt-2 overflow-hidden">
+                                <div id="progress-${faction.id}" class="progress-bar-inner bg-teal-500 h-6 rounded-full flex items-center justify-center text-white font-bold" style="width: 0%;"></div>
+                            </div>
+                             <p id="progress-text-${faction.id}" class="mt-1 text-sm text-gray-600">0 / ${evidences.length}</p>
+                        </div>
+                    `;
+                    progressBarsContainer.insertAdjacentHTML('beforeend', barHTML);
+                });
+            }
+
+            function renderGrid(trackerState) {
+                gridBody.innerHTML = '';
+                evidences.forEach((evidence, evidenceIndex) => {
+                    let rowHTML = `
+                        <div class="grid grid-cols-4 items-center border-t border-gray-200">
+                            <div class="col-span-1 p-4 font-medium">${evidence}</div>
+                    `;
+                    factions.forEach(faction => {
+                        const isChecked = trackerState[faction.id] && trackerState[faction.id][evidenceIndex];
+                        const checkedClass = isChecked ? 'checked' : '';
+                        rowHTML += `
+                            <div class="col-span-1 h-full flex justify-center items-center border-l border-gray-200">
+                                <div class="evidence-cell w-full h-full cursor-pointer flex justify-center items-center p-4 ${checkedClass}" data-faction-id="${faction.id}" data-evidence-index="${evidenceIndex}">
+                                    <span class="checkmark">✓</span>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    rowHTML += `</div>`;
+                    gridBody.insertAdjacentHTML('beforeend', rowHTML);
+                });
+            }
+            
+            function setupEventListeners() {
+                gridBody.addEventListener('click', async (event) => {
+                    const cell = event.target.closest('.evidence-cell');
+                    if (cell) {
+                        await toggleCellState(cell);
+                    }
+                });
+                
+                resetButton.addEventListener('click', async () => {
+                    await resetAll();
+                });
+            }
+
+            async function toggleCellState(cell) {
+                const factionId = cell.dataset.factionId;
+                const evidenceIndex = cell.dataset.evidenceIndex;
+                
+                try {
+                    const docSnap = await getDoc(trackerDocRef);
+                    const trackerState = docSnap.exists() ? docSnap.data() : {};
+                    
+                    if (!trackerState[factionId]) {
+                        trackerState[factionId] = {};
+                    }
+                    trackerState[factionId][evidenceIndex] = !(trackerState[factionId][evidenceIndex] || false);
+                    
+                    await setDoc(trackerDocRef, trackerState);
+                } catch (e) {
+                    console.error("Ошибка при обновлении документа: ", e);
+                }
+            }
+
+            function updateProgressForFaction(trackerState, factionId) {
+                const checkedCount = Object.values(trackerState[factionId] || {}).filter(Boolean).length;
+                const totalCount = evidences.length;
+                const percentage = totalCount > 0 ? (checkedCount / totalCount) * 100 : 0;
+
+                const progressBar = document.getElementById(`progress-${factionId}`);
+                const progressText = document.getElementById(`progress-text-${factionId}`);
+                
+                if (progressBar) {
+                    progressBar.style.width = `${percentage}%`;
+                    progressBar.textContent = `${Math.round(percentage)}%`;
+                }
+                if (progressText) {
+                    progressText.textContent = `${checkedCount} / ${totalCount}`;
+                }
+            }
+            
+            function updateAllProgress(trackerState) {
+                factions.forEach(faction => updateProgressForFaction(trackerState, faction.id));
+            }
+            
+            async function resetAll() {
+                try {
+                    const emptyState = {};
+                    await setDoc(trackerDocRef, emptyState);
+                } catch (e) {
+                    console.error("Ошибка при сбросе документа: ", e);
+                }
+            }
+
+            initialize();
+        });
+    </script>
+</body>
+</html>
